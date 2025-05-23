@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+import uuid
 
 def run_ffprobe(cmd, file_path):
     """Run ffprobe command and return output."""
@@ -68,7 +69,6 @@ def concatenate_batch(temp_files, clip_durations, transition_duration, output_fi
         last_video, last_audio = f"[v{i}]", f"[a{i}]"
         current_offset = offset
 
-    # Corrected f-string: Properly escape and format the filter_complex
     filter_complex_str = ';'.join(filter_complex)
     cmd = (
         f'ffmpeg {" ".join(inputs)} -filter_complex "{filter_complex_str}" '
@@ -81,7 +81,7 @@ def concatenate_batch(temp_files, clip_durations, transition_duration, output_fi
         raise RuntimeError(f"FFmpeg error: {e.stderr}")
 
 def process_file(file, idx, args, width, height, fps):
-    """Process a single file (image or video) to create a clip with zoomed background."""
+    """Process a single file (image or video) to create a clip with zoomed background and fading filename overlay."""
     is_image = file.suffix.lower() in {'.jpg', '.jpeg', '.png'}
     temp_mp4 = f'temp_{idx:03d}.mp4'
     clip_duration = args.image_duration if is_image else min(get_duration(str(file)), args.max_video_duration)
@@ -101,16 +101,30 @@ def process_file(file, idx, args, width, height, fps):
     scaled_w, scaled_h = int(w * scale), int(h * scale)
     x, y = (width - scaled_w) // 2, (height - scaled_h) // 2
 
-    # Single FFmpeg command for background and overlay
+    # Prepare filename for overlay (escape special characters)
+    filename = file.name.replace("'", "'\\''")  # Escape single quotes for FFmpeg
+    font_size = int(height * 0.05)  # Font size proportional to height (e.g., 5% of height)
+    text_y = height - int(height * 0.1)  # Position text 10% from bottom
+
+    # Calculate fade-in and fade-out timings
+    fade_in_end = args.text_fade_in
+    fade_out_start = clip_duration - args.text_fade_out
+    if fade_in_end >= fade_out_start:
+        raise ValueError(f"Fade-in end time ({fade_in_end}s) must be less than fade-out start time ({fade_out_start}s)")
+
+    # Single FFmpeg command for background, overlay, and fading filename text
     input_cmd = f'-loop 1 -i "{file}"' if is_image else f'-i "{file}"'
     audio_cmd = '-f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100' if is_image else ''
     filter_complex = (
         f'[0:v]scale={larger_width}:{larger_height}:force_original_aspect_ratio=increase,'
         f'crop={larger_width}:{larger_height},gblur=sigma={args.blur_radius},'
         f'zoompan=z=\'{zoom_expr}\':x=\'{x_expr}\':y=\'{y_expr}\':d={total_frames}:s={width}x{height}:fps={fps},'
-        f'format=yuv420p[bg];'
-        f'[0:v]scale={scaled_w}:{scaled_h},format=yuv420p[overlay];'
-        f'[bg][overlay]overlay={x}:{y}[v]'
+        f'format=rgba,colorchannelmixer=aa={args.background_opacity}[bg];'
+        f'[0:v]scale={scaled_w}:{scaled_h},format=rgba[overlay];'
+        f'[bg][overlay]overlay={x}:{y},'
+        f'drawtext=text=\'{filename}\':fontcolor=white:fontsize={font_size}:x=(w-text_w)/2:y={text_y}:'
+        f'box=1:boxcolor=black@0.5:boxborderw=5:'
+        f'alpha=\'if(lt(t,{args.text_fade_in}),t/{args.text_fade_in},if(gt(t,{fade_out_start}),1-(t-{fade_out_start})/{args.text_fade_out},1))\'[v]'
     )
     audio_filter = f'[0:a]atrim=0:{clip_duration},asetpts=PTS-STARTPTS[a]' if not is_image else f'[1:a]atrim=0:{clip_duration},asetpts=PTS-STARTPTS[a]'
     
@@ -131,6 +145,12 @@ def assemble(args):
         raise ValueError("Overlay scale must be between 0.0 and 1.0")
     if args.transition_duration < 0 or args.transition_duration >= min(args.image_duration, args.max_video_duration):
         raise ValueError("Transition duration must be non-negative and less than clip duration")
+    if args.text_fade_in < 0 or args.text_fade_out < 0:
+        raise ValueError("Text fade-in and fade-out times must be non-negative")
+    if args.text_fade_in + args.text_fade_out >= min(args.image_duration, args.max_video_duration):
+        raise ValueError("Sum of text fade-in and fade-out times must be less than clip duration")
+    if not 0.0 <= args.background_opacity <= 1.0:
+        raise ValueError("Background opacity must be between 0.0 and 1.0")
 
     # Handle resolution and dimensions
     width, height = args.resolution and get_resolution_dimensions(args.resolution) or (args.width or 1280, args.height or 720)
@@ -203,71 +223,12 @@ def main():
     parser.add_argument('--zoom-end', type=float, default=1.2, help='Background zoom end')
     parser.add_argument('--overlay-scale', type=float, default=0.9, help='Overlay scale factor (0.0 to 1.0)')
     parser.add_argument('--transition-duration', type=float, default=1.0, help='Crossfade transition duration in seconds')
+    parser.add_argument('--text-fade-in', type=float, default=0.5, help='Time to complete text fade-in from start of clip (seconds)')
+    parser.add_argument('--text-fade-out', type=float, default=0.5, help='Time to complete text fade-out before end of clip (seconds)')
+    parser.add_argument('--background-opacity', type=float, default=1.0, help='Background opacity (0.0 to 1.0, default 1.0)')
     parser.add_argument('--threads', type=int, default=4, help='Number of parallel processing threads')
     args = parser.parse_args()
-
-    # Validate arguments
-    if not 0.0 < args.overlay_scale <= 1.0:
-        raise ValueError("Overlay scale must be between 0.0 and 1.0")
-    if args.transition_duration < 0 or args.transition_duration >= min(args.image_duration, args.max_video_duration):
-        raise ValueError("Transition duration must be non-negative and less than clip duration")
-
-    # Handle resolution and dimensions
-    width, height = args.resolution and get_resolution_dimensions(args.resolution) or (args.width or 1280, args.height or 720)
-    validate_16_9_aspect_ratio(width, height)
-    check_file_writable(args.output_file)
-
-    # Scan and sort files
-    input_dir = Path(args.input_dir)
-    supported_exts = {'.jpg', '.jpeg', '.png', '.mp4'}
-    files = sorted(f for f in input_dir.iterdir() if f.suffix.lower() in supported_exts)
-    if not files:
-        raise FileNotFoundError("No supported files found")
-    args.total_files = len(files)
-
-    # Process files in parallel
-    temp_files, clip_durations = [], []
-    with ThreadPoolExecutor(max_workers=args.threads) as executor:
-        results = executor.map(partial(process_file, args=args, width=width, height=height, fps=30), files, range(len(files)))
-        for temp_mp4, clip_duration in results:
-            temp_files.append(temp_mp4)
-            clip_durations.append(clip_duration)
-
-    # Validate temporary files
-    for temp_file in temp_files:
-        if not os.path.exists(temp_file) or os.path.getsize(temp_file) == 0:
-            raise FileNotFoundError(f"Temporary file {temp_file} is missing or empty")
-
-    # Process clips in batches
-    batch_size = 10
-    batch_files = []
-    for batch_idx, i in enumerate(range(0, len(temp_files), batch_size)):
-        batch_temp_files = temp_files[i:i + batch_size]
-        batch_clip_durations = clip_durations[i:i + batch_size]
-        batch_output = f"batch_{batch_idx:03d}.mp4"
-        concatenate_batch(batch_temp_files, batch_clip_durations, args.transition_duration, batch_output, width, height)
-        batch_files.append(batch_output)
-
-    # Final concatenation
-    output_file = Path(args.output_file).resolve()
-    if len(batch_files) == 1:
-        os.rename(batch_files[0], output_file)
-    else:
-        list_file = 'batch_list.txt'
-        with open(list_file, 'w') as f:
-            f.writelines(f"file '{Path(batch_file).absolute()}'\n" for batch_file in batch_files)
-        cmd = (
-            f'ffmpeg -f concat -safe 0 -i "{list_file}" -c:v libx264 -pix_fmt yuv420p '
-            f'-preset ultrafast -crf 23 -c:a aac -b:a 128k -movflags +faststart "{output_file}" -y'
-        )
-        subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        os.remove(list_file)
-
-    # Clean up
-    for temp in temp_files + batch_files:
-        if os.path.exists(temp):
-            os.remove(temp)
-    print(f"Carousel video created: {output_file}")
+    print(assemble(args))
 
 if __name__ == '__main__':
     main()

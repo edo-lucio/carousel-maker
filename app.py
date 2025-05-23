@@ -17,32 +17,58 @@ from assemble import assemble
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 
 class DropHandler(FileSystemEventHandler):
-    def __init__(self, file_list, listbox):
+    def __init__(self, file_list, listbox, working_folder):
         self.file_list = file_list
         self.listbox = listbox
+        self.working_folder = working_folder
         self.valid_extensions = ('.jpg', '.jpeg', '.png', '.mp4', '.mov', '.avi')
+        self.insertion_counter = 0
+        self.processed_files = set()  # Track processed files to avoid re-renaming
 
     def on_created(self, event):
         if not event.is_directory:
             file_path = event.src_path
             logging.debug(f"Detected file creation: {file_path}")
-            if file_path.lower().endswith(self.valid_extensions):
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self.file_list.append((file_path, timestamp))
-                self.update_listbox()
+            if file_path.lower().endswith(self.valid_extensions) and file_path not in self.processed_files:
+                new_file_path = self.rename_file(file_path)
+                if new_file_path:
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    self.file_list.append((new_file_path, timestamp))
+                    self.processed_files.add(new_file_path)  # Mark as processed
+                    self.update_listbox()
             else:
-                logging.debug(f"Ignored file (invalid extension): {file_path}")
+                logging.debug(f"Ignored file (invalid extension or already processed): {file_path}")
 
     def on_moved(self, event):
         if not event.is_directory:
             file_path = event.dest_path
             logging.debug(f"Detected file move: {file_path}")
-            if file_path.lower().endswith(self.valid_extensions):
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self.file_list.append((file_path, timestamp))
-                self.update_listbox()
+            if file_path.lower().endswith(self.valid_extensions) and file_path not in self.processed_files:
+                new_file_path = self.rename_file(file_path)
+                if new_file_path:
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    self.file_list.append((new_file_path, timestamp))
+                    self.processed_files.add(new_file_path)  # Mark as processed
+                    self.update_listbox()
             else:
-                logging.debug(f"Ignored moved file (invalid extension): {file_path}")
+                logging.debug(f"Ignored moved file (invalid extension or already processed): {file_path}")
+
+    def rename_file(self, file_path):
+        try:
+            self.insertion_counter += 1
+            file_name = os.path.basename(file_path)
+            # Strip any existing #<number> prefixes to avoid stacking
+            clean_file_name = file_name
+            while clean_file_name.startswith('#') and clean_file_name[1].isdigit():
+                clean_file_name = clean_file_name[2:]  # Remove #<number>
+            new_file_name = f"#{self.insertion_counter}#{clean_file_name}"
+            new_file_path = os.path.join(self.working_folder, new_file_name)
+            os.rename(file_path, new_file_path)
+            logging.debug(f"Renamed file: {file_path} to {new_file_path}")
+            return new_file_path
+        except Exception as e:
+            logging.error(f"Failed to rename file {file_path}: {e}")
+            return None
 
     def update_listbox(self):
         self.listbox.delete(0, tk.END)
@@ -79,13 +105,16 @@ class DragDropApp:
             'input_dir': "queen 14",
             'output_file': "iku_2.mp4",
             'resolution': "1080p",
-            'image_duration': 10.0,
-            'max_video_duration': 10.0,
+            'image_duration': 11.0,
+            'max_video_duration': 11.0,
             'blur_radius': 20.0,
-            'zoom_start': 1.0,
-            'zoom_end': 1.2,
+            'zoom_start': 1.4,
+            'zoom_end': 1.6,
             'overlay_scale': 0.8,
             'transition_duration': 2.0,
+            'text_fade_in': 2,
+            'text_fade_out': 2,
+            'background_opacity': 1.0,
             'threads': 4
         }
 
@@ -126,9 +155,21 @@ class DragDropApp:
         self.transition_duration_var = tk.DoubleVar(value=self.defaults['transition_duration'])
         ttk.Entry(self.form_frame, textvariable=self.transition_duration_var).grid(row=8, column=1, sticky="ew", padx=5, pady=2)
 
-        ttk.Label(self.form_frame, text="Threads:").grid(row=9, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(self.form_frame, text="Text Fade-In (s):").grid(row=9, column=0, sticky="w", padx=5, pady=2)
+        self.text_fade_in_var = tk.DoubleVar(value=self.defaults['text_fade_in'])
+        ttk.Entry(self.form_frame, textvariable=self.text_fade_in_var).grid(row=9, column=1, sticky="ew", padx=5, pady=2)
+
+        ttk.Label(self.form_frame, text="Text Fade-Out (s):").grid(row=10, column=0, sticky="w", padx=5, pady=2)
+        self.text_fade_out_var = tk.DoubleVar(value=self.defaults['text_fade_out'])
+        ttk.Entry(self.form_frame, textvariable=self.text_fade_out_var).grid(row=10, column=1, sticky="ew", padx=5, pady=2)
+
+        ttk.Label(self.form_frame, text="Background Opacity (0-1):").grid(row=11, column=0, sticky="w", padx=5, pady=2)
+        self.background_opacity_var = tk.DoubleVar(value=self.defaults['background_opacity'])
+        ttk.Entry(self.form_frame, textvariable=self.background_opacity_var).grid(row=11, column=1, sticky="ew", padx=5, pady=2)
+
+        ttk.Label(self.form_frame, text="Threads:").grid(row=12, column=0, sticky="w", padx=5, pady=2)
         self.threads_var = tk.IntVar(value=self.defaults['threads'])
-        ttk.Entry(self.form_frame, textvariable=self.threads_var).grid(row=9, column=1, sticky="ew", padx=5, pady=2)
+        ttk.Entry(self.form_frame, textvariable=self.threads_var).grid(row=12, column=1, sticky="ew", padx=5, pady=2)
 
         self.form_frame.columnconfigure(1, weight=1)
 
@@ -136,7 +177,7 @@ class DragDropApp:
         self.process_button.pack(pady=10)
 
         # Set up file system watcher
-        self.event_handler = DropHandler(self.file_list, self.listbox)
+        self.event_handler = DropHandler(self.file_list, self.listbox, self.working_folder)
         self.observer = Observer()
         try:
             self.observer.schedule(self.event_handler, self.working_folder, recursive=False)
@@ -181,6 +222,9 @@ class DragDropApp:
                 zoom_end=self.zoom_end_var.get(),
                 overlay_scale=self.overlay_scale_var.get(),
                 transition_duration=self.transition_duration_var.get(),
+                text_fade_in=self.text_fade_in_var.get(),
+                text_fade_out=self.text_fade_out_var.get(),
+                background_opacity=self.background_opacity_var.get(),
                 threads=self.threads_var.get()
             )
             result = assemble(args)
