@@ -112,9 +112,9 @@ class DragDropApp:
             'zoom_end': 1.6,
             'overlay_scale': 0.8,
             'transition_duration': 2.0,
-            'text_fade_in': 2,
+            'text_fade_in': 4,
             'text_fade_out': 2,
-            'background_opacity': 1.0,
+            'background_opacity': 0.6,
             'threads': 4
         }
 
