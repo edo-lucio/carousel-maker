@@ -107,15 +107,16 @@ class DragDropApp:
             'resolution': "1080p",
             'image_duration': 11.0,
             'max_video_duration': 11.0,
-            'blur_radius': 10.0,
+            'blur_radius': 15.0,
             'zoom_start': 1.4,
             'zoom_end': 1.6,
             'overlay_scale': 0.8,
-            'transition_duration': 2.0,
+            'transition_duration': 1.0,
             'text_fade_in': 4,
             'text_fade_out': 2,
-            'background_opacity': 0.6,
-            'threads': 2
+            'background_opacity': 0.8,
+            'threads': 2,
+            'draw_text': True
         }
 
         # Form fields
@@ -171,6 +172,10 @@ class DragDropApp:
         self.threads_var = tk.IntVar(value=self.defaults['threads'])
         ttk.Entry(self.form_frame, textvariable=self.threads_var).grid(row=12, column=1, sticky="ew", padx=5, pady=2)
 
+        ttk.Label(self.form_frame, text="Draw Text:").grid(row=13, column=0, sticky="w", padx=5, pady=2)
+        self.draw_text_var = tk.BooleanVar(value=self.defaults['draw_text'])
+        ttk.Checkbutton(self.form_frame, variable=self.draw_text_var).grid(row=13, column=1, sticky="w", padx=5, pady=2)
+
         self.form_frame.columnconfigure(1, weight=1)
 
         self.process_button = tk.Button(root, text="Process Folder", command=self.process_folder)
@@ -225,7 +230,8 @@ class DragDropApp:
                 text_fade_in=self.text_fade_in_var.get(),
                 text_fade_out=self.text_fade_out_var.get(),
                 background_opacity=self.background_opacity_var.get(),
-                threads=self.threads_var.get()
+                threads=self.threads_var.get(),
+                draw_text=self.draw_text_var.get()
             )
             result = assemble(args)
             messagebox.showinfo("Success", result)

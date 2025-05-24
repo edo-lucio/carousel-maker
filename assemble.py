@@ -79,7 +79,7 @@ def concatenate_batch(temp_files, clip_durations, transition_duration, output_fi
         raise RuntimeError(f"FFmpeg error: {e.stderr}")
 
 def process_file(file, idx, args, width, height, fps, temp_dir):
-    """Process a single file to create a clip with zoomed background and fading filename overlay."""
+    """Process a single file to create a clip with zoomed background and optional fading filename overlay."""
     is_image = file.suffix.lower() in {'.jpg', '.jpeg', '.png'}
     temp_mp4 = os.path.join(temp_dir, f'temp_{idx:03d}_{uuid.uuid4().hex}.mp4')
     clip_duration = args.image_duration if is_image else min(get_duration(str(file)), args.max_video_duration)
@@ -97,15 +97,6 @@ def process_file(file, idx, args, width, height, fps, temp_dir):
     scaled_w, scaled_h = int(w * scale), int(h * scale)
     x, y = (width - scaled_w) // 2, (height - scaled_h) // 2
 
-    filename = file.name.replace("'", "'\\''")
-    font_size = 34
-    text_y = height - int(height * 0.1)
-    fade_in_end = args.text_fade_in
-    fade_out_start = clip_duration - args.text_fade_out
-
-    if fade_in_end >= fade_out_start:
-        raise ValueError(f"Fade-in end time ({fade_in_end}s) must be less than fade-out start time ({fade_out_start}s)")
-
     input_cmd = f'-loop 1 -i "{file}"' if is_image else f'-i "{file}"'
     audio_cmd = '-f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100' if is_image else ''
     filter_complex = (
@@ -114,12 +105,32 @@ def process_file(file, idx, args, width, height, fps, temp_dir):
         f'zoompan=z=\'{zoom_expr}\':x=\'{x_expr}\':y=\'{y_expr}\':d={total_frames}:s={width}x{height}:fps={fps},'
         f'colorchannelmixer=rr={args.background_opacity}:gg={args.background_opacity}:bb={args.background_opacity}[bg];'
         f'[0:v]scale={scaled_w}:{scaled_h},format=rgba,colorchannelmixer=aa=0.8[overlay];'
-        f'[bg][overlay]overlay={x}:{y},'
-        f'drawtext=text=\'{filename}\':fontfile=Anton-Regular.ttf:'
-        f'fontcolor=yellow:fontsize={font_size}:x=(w-text_w)/2:y={text_y}:'
-        f'borderw=2:bordercolor=black:'
-        f'alpha=\'if(lt(t,{args.text_fade_in}),t/{args.text_fade_in},if(gt(t,{fade_out_start}),1-(t-{fade_out_start})/{args.text_fade_out},1))\'[v]'
+        f'[bg][overlay]overlay={x}:{y}[v]'
     )
+
+    if args.draw_text:
+        filename = file.name.replace("'", "'\\''")
+        font_size = 34
+        text_y = height - int(height * 0.1)
+        fade_in_end = args.text_fade_in
+        fade_out_start = clip_duration - args.text_fade_out
+
+        if fade_in_end >= fade_out_start:
+            raise ValueError(f"Fade-in end time ({fade_in_end}s) must be less than fade-out start time ({fade_out_start}s)")
+        
+        filter_complex = (
+            f'[0:v]scale={larger_width}:{larger_height}:force_original_aspect_ratio=increase,'
+            f'crop={larger_width}:{larger_height},gblur=sigma={args.blur_radius},'
+            f'zoompan=z=\'{zoom_expr}\':x=\'{x_expr}\':y=\'{y_expr}\':d={total_frames}:s={width}x{height}:fps={fps},'
+            f'colorchannelmixer=rr={args.background_opacity}:gg={args.background_opacity}:bb={args.background_opacity}[bg];'
+            f'[0:v]scale={scaled_w}:{scaled_h},format=rgba,colorchannelmixer=aa=0.8[overlay];'
+            f'[bg][overlay]overlay={x}:{y},'
+            f'drawtext=text=\'{filename}\':fontfile=Anton-Regular.ttf:'
+            f'fontcolor=yellow:fontsize={font_size}:x=(w-text_w)/2:y={text_y}:'
+            f'borderw=2:bordercolor=black:'
+            f'alpha=\'if(lt(t,{args.text_fade_in}),t/{args.text_fade_in},if(gt(t,{fade_out_start}),1-(t-{fade_out_start})/{args.text_fade_out},1))\'[v]'
+        )
+
     audio_filter = f'[0:a]atrim=0:{clip_duration},asetpts=PTS-STARTPTS[a]' if not is_image else f'[1:a]atrim=0:{clip_duration},asetpts=PTS-STARTPTS[a]'
     
     cmd = (
@@ -138,10 +149,11 @@ def assemble(args):
         raise ValueError("Overlay scale must be between 0.0 and 1.0")
     if args.transition_duration < 0 or args.transition_duration >= min(args.image_duration, args.max_video_duration):
         raise ValueError("Transition duration must be non-negative and less than clip duration")
-    if args.text_fade_in < 0 or args.text_fade_out < 0:
-        raise ValueError("Text fade-in and fade-out times must be non-negative")
-    if args.text_fade_in + args.text_fade_out >= min(args.image_duration, args.max_video_duration):
-        raise ValueError("Sum of text fade-in and fade-out times must be less than clip duration")
+    if args.draw_text:
+        if args.text_fade_in < 0 or args.text_fade_out < 0:
+            raise ValueError("Text fade-in and fade-out times must be non-negative")
+        if args.text_fade_in + args.text_fade_out >= min(args.image_duration, args.max_video_duration):
+            raise ValueError("Sum of text fade-in and fade-out times must be less than clip duration")
     if not 0.0 <= args.background_opacity <= 1.0:
         raise ValueError("Background opacity must be between 0.0 and 1.0")
 
@@ -156,7 +168,7 @@ def assemble(args):
         raise FileNotFoundError("No supported files found")
     args.total_files = len(files)
 
-    batch_size = max(1, min(10, args.threads * 2))  # Adjust batch size based on threads
+    batch_size = max(1, min(10, args.threads * 2))
     output_file = Path(args.output_file).resolve()
     
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -220,6 +232,7 @@ def main():
     parser.add_argument('--text-fade-out', type=float, default=0.5, help='Time to complete text fade-out before end of clip (seconds)')
     parser.add_argument('--background-opacity', type=float, default=1.0, help='Background luminosity (0.0 to 1.0, lower is darker)')
     parser.add_argument('--threads', type=int, default=4, help='Number of parallel processing threads')
+    parser.add_argument('--draw-text', type=bool, default=True, help='Whether to draw filename text on clips (True/False)')
     args = parser.parse_args()
     print(assemble(args))
 
