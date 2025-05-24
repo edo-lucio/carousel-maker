@@ -107,7 +107,7 @@ class DragDropApp:
             'resolution': "1080p",
             'image_duration': 11.0,
             'max_video_duration': 11.0,
-            'blur_radius': 20.0,
+            'blur_radius': 10.0,
             'zoom_start': 1.4,
             'zoom_end': 1.6,
             'overlay_scale': 0.8,
@@ -115,7 +115,7 @@ class DragDropApp:
             'text_fade_in': 4,
             'text_fade_out': 2,
             'background_opacity': 0.6,
-            'threads': 4
+            'threads': 2
         }
 
         # Form fields

@@ -5,13 +5,16 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import uuid
+import tempfile
 
-def run_ffprobe(cmd, file_path):
-    """Run ffprobe command and return output."""
+def run_ffprobe(file_path, entries, stream='v:0'):
+    """Run ffprobe command and return parsed output."""
+    cmd = ['ffprobe', '-v', 'error', '-select_streams', stream, 
+           '-show_entries', entries, '-of', 'csv=p=0']
     try:
         result = subprocess.run(
             cmd + [file_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
-            text=True, check=True
+            text=True, check=True, encoding='utf-8'
         )
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
@@ -19,28 +22,24 @@ def run_ffprobe(cmd, file_path):
 
 def get_dimensions(file_path):
     """Get width and height of a media file using ffprobe."""
-    cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', 
-           '-show_entries', 'stream=width,height', '-of', 'csv=p=0']
-    width, height = map(int, run_ffprobe(cmd, file_path).split(','))
+    width, height = map(int, run_ffprobe(file_path, 'stream=width,height').split(','))
     return width, height
 
 def get_duration(file_path):
     """Get duration of a video file using ffprobe."""
-    cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', 
-           '-of', 'csv=p=0']
-    return float(run_ffprobe(cmd, file_path))
+    try:
+        return float(run_ffprobe(file_path, 'format=duration', stream='v:0'))
+    except ValueError:
+        return 0.0
 
 def validate_16_9_aspect_ratio(width, height):
     """Validate that width and height form a 16:9 aspect ratio."""
-    aspect_ratio = width / height
-    if abs(aspect_ratio - 16/9) > 0.01:
-        raise ValueError(f"Aspect ratio {aspect_ratio:.4f} is not 16:9")
+    if abs(width / height - 16/9) > 0.01:
+        raise ValueError(f"Aspect ratio {width/height:.4f} is not 16:9")
 
 def get_resolution_dimensions(resolution):
     """Return width and height for a given resolution preset."""
     presets = {'720p': (1280, 720), '1080p': (1920, 1080), '4k': (3840, 2160)}
-    if resolution not in presets:
-        raise ValueError(f"Invalid resolution: {resolution}. Choose from {list(presets.keys())}")
     return presets[resolution]
 
 def check_file_writable(file_path):
@@ -56,8 +55,8 @@ def concatenate_batch(temp_files, clip_durations, transition_duration, output_fi
         os.rename(temp_files[0], output_file)
         return
 
-    filter_complex = []
     inputs = [f'-i "{temp_file}"' for temp_file in temp_files]
+    filter_complex = []
     current_offset = 0
     last_video, last_audio = "[0:v]", "[0:a]"
     for i in range(1, len(temp_files)):
@@ -69,50 +68,44 @@ def concatenate_batch(temp_files, clip_durations, transition_duration, output_fi
         last_video, last_audio = f"[v{i}]", f"[a{i}]"
         current_offset = offset
 
-    filter_complex_str = ';'.join(filter_complex)
     cmd = (
-        f'ffmpeg {" ".join(inputs)} -filter_complex "{filter_complex_str}" '
+        f'ffmpeg {" ".join(inputs)} -filter_complex "{';'.join(filter_complex)}" '
         f'-map "{last_video}" -map "{last_audio}" -c:v libx264 -pix_fmt yuv420p '
-        f'-preset ultrafast -crf 23 -c:a aac -b:a 128k -movflags +faststart "{output_file}" -y'
+        f'-preset ultrafast -crf 28 -c:a aac -b:a 128k -movflags +faststart "{output_file}" -y'
     )
     try:
-        subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"FFmpeg error: {e.stderr}")
 
-def process_file(file, idx, args, width, height, fps):
-    """Process a single file (image or video) to create a clip with zoomed background and fading filename overlay."""
+def process_file(file, idx, args, width, height, fps, temp_dir):
+    """Process a single file to create a clip with zoomed background and fading filename overlay."""
     is_image = file.suffix.lower() in {'.jpg', '.jpeg', '.png'}
-    temp_mp4 = f'temp_{idx:03d}.mp4'
+    temp_mp4 = os.path.join(temp_dir, f'temp_{idx:03d}_{uuid.uuid4().hex}.mp4')
     clip_duration = args.image_duration if is_image else min(get_duration(str(file)), args.max_video_duration)
     if idx < args.total_files - 1:
         clip_duration += args.transition_duration
 
-    # Extract first frame and create background in one FFmpeg call
     scale_factor = 1.0
     larger_width, larger_height = int(width * scale_factor), int(height * scale_factor)
     total_frames = int(fps * clip_duration)
     zoom_expr = f"{args.zoom_start}+({args.zoom_end}-{args.zoom_start})*on/{total_frames}"
     x_expr, y_expr = f"(iw-iw*{zoom_expr})/2", f"(ih-ih*{zoom_expr})/2"
     
-    # Calculate overlay dimensions
     w, h = get_dimensions(str(file))
     scale = min(width / w, height / h) * args.overlay_scale
     scaled_w, scaled_h = int(w * scale), int(h * scale)
     x, y = (width - scaled_w) // 2, (height - scaled_h) // 2
 
-    # Prepare filename for overlay
     filename = file.name.replace("'", "'\\''")
     font_size = 34
     text_y = height - int(height * 0.1)
-
-    # Calculate fade-in and fade-out timings
     fade_in_end = args.text_fade_in
     fade_out_start = clip_duration - args.text_fade_out
+
     if fade_in_end >= fade_out_start:
         raise ValueError(f"Fade-in end time ({fade_in_end}s) must be less than fade-out start time ({fade_out_start}s)")
 
-    # FFmpeg command with background luminosity adjustment
     input_cmd = f'-loop 1 -i "{file}"' if is_image else f'-i "{file}"'
     audio_cmd = '-f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100' if is_image else ''
     filter_complex = (
@@ -132,16 +125,15 @@ def process_file(file, idx, args, width, height, fps):
     cmd = (
         f'ffmpeg {input_cmd} {audio_cmd} -filter_complex "{filter_complex};{audio_filter}" '
         f'-map "[v]" -map "[a]" -t {clip_duration} -c:v libx264 -pix_fmt yuv420p '
-        f'-preset ultrafast -crf 23 -c:a aac -b:a 128k -movflags +faststart -threads 1 "{temp_mp4}" -y'
+        f'-preset ultrafast -crf 28 -c:a aac -b:a 128k -movflags +faststart -threads 1 "{temp_mp4}" -y'
     )
     try:
-        subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         return temp_mp4, clip_duration
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"FFmpeg error processing {file}: {e.stderr}")
 
 def assemble(args):
-    # Validate arguments
     if not 0.0 < args.overlay_scale <= 1.0:
         raise ValueError("Overlay scale must be between 0.0 and 1.0")
     if args.transition_duration < 0 or args.transition_duration >= min(args.image_duration, args.max_video_duration):
@@ -151,14 +143,12 @@ def assemble(args):
     if args.text_fade_in + args.text_fade_out >= min(args.image_duration, args.max_video_duration):
         raise ValueError("Sum of text fade-in and fade-out times must be less than clip duration")
     if not 0.0 <= args.background_opacity <= 1.0:
-        raise ValueError("Background opacity (luminosity) must be between 0.0 and 1.0")
+        raise ValueError("Background opacity must be between 0.0 and 1.0")
 
-    # Handle resolution and dimensions
     width, height = args.resolution and get_resolution_dimensions(args.resolution) or (args.width or 1280, args.height or 720)
     validate_16_9_aspect_ratio(width, height)
     check_file_writable(args.output_file)
 
-    # Scan and sort files
     input_dir = Path(args.input_dir)
     supported_exts = {'.jpg', '.jpeg', '.png', '.mp4'}
     files = sorted(f for f in input_dir.iterdir() if f.suffix.lower() in supported_exts)
@@ -166,67 +156,49 @@ def assemble(args):
         raise FileNotFoundError("No supported files found")
     args.total_files = len(files)
 
-    # Process files in parallel and write batches incrementally
-    batch_size = 10  # Number of clips per batch
+    batch_size = max(1, min(10, args.threads * 2))  # Adjust batch size based on threads
     output_file = Path(args.output_file).resolve()
-    temp_files, clip_durations = [], []
     
-    with ThreadPoolExecutor(max_workers=args.threads) as executor:
-        for batch_idx, start_idx in enumerate(range(0, len(files), batch_size)):
-            # Process a batch of files
-            batch_files = files[start_idx:start_idx + batch_size]
-            batch_temp_files, batch_clip_durations = [], []
-            results = executor.map(lambda f, i: process_file(f, i + start_idx, args=args, width=width, height=height, fps=30), 
-                                 batch_files, range(len(batch_files)))
-            
-            for temp_mp4, clip_duration in results:
-                if not os.path.exists(temp_mp4) or os.path.getsize(temp_mp4) == 0:
-                    raise FileNotFoundError(f"Temporary file {temp_mp4} is missing or empty")
-                batch_temp_files.append(temp_mp4)
-                batch_clip_durations.append(clip_duration)
-            
-            # Concatenate the batch
-            batch_output = f"batch_{batch_idx:03d}_{uuid.uuid4().hex}.mp4"
-            concatenate_batch(batch_temp_files, batch_clip_durations, args.transition_duration, batch_output, width, height)
-            
-            # Append or write to the final output file
-            if batch_idx == 0:
-                # First batch: write directly to output file
-                if os.path.exists(output_file):
-                    os.remove(output_file)  # Remove existing file to allow overwrite
-                os.rename(batch_output, output_file)
-            else:
-                # Subsequent batches: append to output file using concat
-                temp_concat_file = f"temp_concat_{uuid.uuid4().hex}.mp4"
-                list_file = f"concat_list_{uuid.uuid4().hex}.txt"
-                with open(list_file, 'w') as f:
-                    f.write(f"file '{output_file}'\n")
-                    f.write(f"file '{batch_output}'\n")
-                cmd = (
-                    f'ffmpeg -f concat -safe 0 -i "{list_file}" -c:v copy -c:a copy '
-                    f'-movflags +faststart "{temp_concat_file}" -y'
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with ThreadPoolExecutor(max_workers=args.threads) as executor:
+            for batch_idx, start_idx in enumerate(range(0, len(files), batch_size)):
+                batch_files = files[start_idx:start_idx + batch_size]
+                results = executor.map(
+                    partial(process_file, args=args, width=width, height=height, fps=30, temp_dir=temp_dir),
+                    batch_files, range(len(batch_files))
                 )
-                try:
-                    subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                
+                batch_temp_files, batch_clip_durations = [], []
+                for temp_mp4, clip_duration in results:
+                    if not os.path.exists(temp_mp4) or os.path.getsize(temp_mp4) == 0:
+                        raise FileNotFoundError(f"Temporary file {temp_mp4} is missing or empty")
+                    batch_temp_files.append(temp_mp4)
+                    batch_clip_durations.append(clip_duration)
+                
+                batch_output = os.path.join(temp_dir, f"batch_{batch_idx:03d}_{uuid.uuid4().hex}.mp4")
+                concatenate_batch(batch_temp_files, batch_clip_durations, args.transition_duration, batch_output, width, height)
+                
+                if batch_idx == 0:
                     if os.path.exists(output_file):
-                        os.remove(output_file)  # Remove existing file to allow overwrite
-                    os.rename(temp_concat_file, output_file)
-                except subprocess.CalledProcessError as e:
-                    raise RuntimeError(f"FFmpeg error during concatenation: {e.stderr}")
-                finally:
-                    if os.path.exists(list_file):
-                        os.remove(list_file)
-                    if os.path.exists(temp_concat_file):
-                        os.remove(temp_concat_file)
-            
-            # Clean up batch temporary files
-            for temp in batch_temp_files + [batch_output]:
-                if os.path.exists(temp):
-                    os.remove(temp)
-            
-            # Extend the lists for tracking (optional, for validation)
-            temp_files.extend(batch_temp_files)
-            clip_durations.extend(batch_clip_durations)
+                        os.remove(output_file)
+                    os.rename(batch_output, output_file)
+                else:
+                    temp_concat_file = os.path.join(temp_dir, f"temp_concat_{uuid.uuid4().hex}.mp4")
+                    list_file = os.path.join(temp_dir, f"concat_list_{uuid.uuid4().hex}.txt")
+                    with open(list_file, 'w') as f:
+                        f.write(f"file '{output_file}'\n")
+                        f.write(f"file '{batch_output}'\n")
+                    cmd = (
+                        f'ffmpeg -f concat -safe 0 -i "{list_file}" -c:v copy -c:a copy '
+                        f'-movflags +faststart "{temp_concat_file}" -y'
+                    )
+                    try:
+                        subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                        if os.path.exists(output_file):
+                            os.remove(output_file)
+                        os.rename(temp_concat_file, output_file)
+                    except subprocess.CalledProcessError as e:
+                        raise RuntimeError(f"FFmpeg error during concatenation: {e.stderr}")
     
     return f"Carousel video created: {output_file}"
 
