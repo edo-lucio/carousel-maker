@@ -115,7 +115,7 @@ def process_file(file, idx, args, width, height, fps, temp_dir):
         f'colorchannelmixer=rr={args.background_opacity}:gg={args.background_opacity}:bb={args.background_opacity}[bg];'
         f'[0:v]scale={scaled_w}:{scaled_h},format=rgba,colorchannelmixer=aa=0.8[overlay];'
         f'[bg][overlay]overlay={x}:{y},'
-        f'drawtext=text=\'{filename}\':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:'
+        f'drawtext=text=\'{filename}\':fontfile=Anton-Regular.ttf:'
         f'fontcolor=yellow:fontsize={font_size}:x=(w-text_w)/2:y={text_y}:'
         f'borderw=2:bordercolor=black:'
         f'alpha=\'if(lt(t,{args.text_fade_in}),t/{args.text_fade_in},if(gt(t,{fade_out_start}),1-(t-{fade_out_start})/{args.text_fade_out},1))\'[v]'
