@@ -49,8 +49,14 @@ def check_file_writable(file_path):
     if not os.access(file_path.parent, os.W_OK):
         raise PermissionError(f"No write permission for {file_path.parent}")
 
-def concatenate_batch(temp_files, clip_durations, transition_duration, output_file, width, height):
-    """Concatenate a batch of clips with crossfade transitions."""
+def find_subtitle_file(input_dir):
+    """Find .srt file in the input directory."""
+    input_path = Path(input_dir)
+    srt_files = list(input_path.glob("*.srt"))
+    return str(srt_files[0]).replace('\\', '\\\\').replace(':', '\\:') if srt_files else None
+
+def concatenate_batch(temp_files, clip_durations, transition_duration, transition_type, output_file, width, height):
+    """Concatenate a batch of clips with parameterized xfade transitions."""
     if len(temp_files) == 1:
         os.rename(temp_files[0], output_file)
         return
@@ -62,7 +68,7 @@ def concatenate_batch(temp_files, clip_durations, transition_duration, output_fi
     for i in range(1, len(temp_files)):
         offset = max(0, current_offset + clip_durations[i-1] - transition_duration)
         filter_complex.append(
-            f"{last_video}[{i}:v]xfade=transition=fade:duration={transition_duration}:offset={offset}[v{i}];"
+            f"{last_video}[{i}:v]xfade=transition={transition_type}:duration={transition_duration}:offset={offset}[v{i}];"
             f"{last_audio}[{i}:a]acrossfade=d={transition_duration}[a{i}]"
         )
         last_video, last_audio = f"[v{i}]", f"[a{i}]"
@@ -86,12 +92,32 @@ def process_file(file, idx, args, width, height, fps, temp_dir):
     if idx < args.total_files - 1:
         clip_duration += args.transition_duration
 
-    scale_factor = 1.0
+    scale_factor = 1.5
     larger_width, larger_height = int(width * scale_factor), int(height * scale_factor)
     total_frames = int(fps * clip_duration)
     zoom_expr = f"{args.zoom_start}+({args.zoom_end}-{args.zoom_start})*on/{total_frames}"
-    x_expr, y_expr = f"(iw-iw*{zoom_expr})/2", f"(ih-ih*{zoom_expr})/2"
-    
+
+    # Define x and y expressions based on zoom direction
+    zoom_direction = args.zoom_direction
+    if zoom_direction == 'top':
+        x_expr, y_expr = f"(iw-iw*{zoom_expr})/2", "0"
+    elif zoom_direction == 'bottom':
+        x_expr, y_expr = f"(iw-iw*{zoom_expr})/2", f"ih*(1-{zoom_expr})"
+    elif zoom_direction == 'right':
+        x_expr, y_expr = f"iw*(1-{zoom_expr})", f"(ih-ih*{zoom_expr})/2"
+    elif zoom_direction == 'left':
+        x_expr, y_expr = "0", f"(ih-ih*{zoom_expr})/2"
+    elif zoom_direction == 'top-right':
+        x_expr, y_expr = f"iw*(1-{zoom_expr})", "0"
+    elif zoom_direction == 'top-left':
+        x_expr, y_expr = "0", "0"
+    elif zoom_direction == 'bottom-right':
+        x_expr, y_expr = f"iw*(1-{zoom_expr})", f"ih*(1-{zoom_expr})"
+    elif zoom_direction == 'bottom-left':
+        x_expr, y_expr = "0", f"ih*(1-{zoom_expr})"
+    else:  # Default to center (original behavior)
+        x_expr, y_expr = f"(iw-iw*{zoom_expr})/2", f"(ih-ih*{zoom_expr})/2"
+
     w, h = get_dimensions(str(file))
     scale = min(width / w, height / h) * args.overlay_scale
     scaled_w, scaled_h = int(w * scale), int(h * scale)
@@ -143,7 +169,7 @@ def process_file(file, idx, args, width, height, fps, temp_dir):
         return temp_mp4, clip_duration
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"FFmpeg error processing {file}: {e.stderr}")
-
+    
 def assemble(args):
     if not 0.0 < args.overlay_scale <= 1.0:
         raise ValueError("Overlay scale must be between 0.0 and 1.0")
@@ -156,6 +182,14 @@ def assemble(args):
             raise ValueError("Sum of text fade-in and fade-out times must be less than clip duration")
     if not 0.0 <= args.background_opacity <= 1.0:
         raise ValueError("Background opacity must be between 0.0 and 1.0")
+    if args.transition_type not in [
+        'fade', 'fadeblack', 'fadewhite', 'wipeleft', 'wiperight', 'wipeup', 'wipedown',
+        'slideleft', 'slideright', 'slideup', 'slidedown', 'circlecrop', 'circleopen',
+        'circleclose', 'vertopen', 'vertclose', 'horzopen', 'horzclose', 'dissolve',
+        'pixelize', 'radial', 'hlslice', 'vuslice', 'hblur', 'fadegrays', 'wipetl',
+        'wipetr', 'wipebl', 'wipetr', 'squeezev', 'squeezeh', 'zoomin'
+    ]:
+        raise ValueError(f"Invalid transition type: {args.transition_type}. Supported types: fade, fadeblack, fadewhite, wipeleft, wiperight, wipeup, wipedown, slideleft, slideright, slideup, slidedown, circlecrop, circleopen, circleclose, vertopen, vertclose, horzopen, horzclose, dissolve, pixelize, radial, hlslice, vuslice, hblur, fadegrays, wipetl, wipetr, wipebl, wipetr, squeezev, squeezeh, zoomin")
 
     width, height = args.resolution and get_resolution_dimensions(args.resolution) or (args.width or 1280, args.height or 720)
     validate_16_9_aspect_ratio(width, height)
@@ -167,6 +201,11 @@ def assemble(args):
     if not files:
         raise FileNotFoundError("No supported files found")
     args.total_files = len(files)
+
+    # Find subtitle file
+    subtitle_file = find_subtitle_file(args.input_dir)
+    if subtitle_file:
+        print(f"Found subtitle file: {subtitle_file}")
 
     batch_size = max(1, min(10, args.threads * 2))
     output_file = Path(args.output_file).resolve()
@@ -188,7 +227,7 @@ def assemble(args):
                     batch_clip_durations.append(clip_duration)
                 
                 batch_output = os.path.join(temp_dir, f"batch_{batch_idx:03d}_{uuid.uuid4().hex}.mp4")
-                concatenate_batch(batch_temp_files, batch_clip_durations, args.transition_duration, batch_output, width, height)
+                concatenate_batch(batch_temp_files, batch_clip_durations, args.transition_duration, args.transition_type, batch_output, width, height)
                 
                 if batch_idx == 0:
                     if os.path.exists(output_file):
@@ -212,27 +251,49 @@ def assemble(args):
                     except subprocess.CalledProcessError as e:
                         raise RuntimeError(f"FFmpeg error during concatenation: {e.stderr}")
     
+    if subtitle_file:
+        final_output = str(output_file).replace('.mp4', '_with_subtitles.mp4')
+        subtitle_cmd = (
+            f'ffmpeg -i "{output_file}" -vf '
+            f'"subtitles=\'{subtitle_file}\':'
+            f'force_style=\'FontName=Impact,FontSize=22,PrimaryColour=&H0000FFFF&,OutlineColour=&H00000000&,Outline=1,Shadow=0\'" '
+            f'-c:a copy "{final_output}" -y'
+        )
+
+        try:
+            subprocess.run(subtitle_cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            os.remove(output_file)  # Remove original
+            os.rename(final_output, output_file)  # Rename with subtitles to original name
+            print(f"Subtitles added from: {subtitle_file}")
+        except subprocess.CalledProcessError as e:
+            print(f"Warning: Could not add subtitles: {e.stderr}")
+    
     return f"Carousel video created: {output_file}"
 
 def main():
-    parser = argparse.ArgumentParser(description='Assemble a carousel video with zooming background and crossfade transitions (16:9).')
+    parser = argparse.ArgumentParser(description='Assemble a carousel video with zooming background and parameterized xfade transitions (16:9).')
     parser.add_argument('--input-dir', required=True, help='Directory with image/video assets')
     parser.add_argument('--output-file', required=True, help='Output MP4 file path')
     parser.add_argument('--resolution', choices=['720p', '1080p', '4k'], help='Resolution preset')
     parser.add_argument('--width', type=int, help='Canvas width (16:9 ratio with height)')
     parser.add_argument('--height', type=int, help='Canvas height (16:9 ratio with width)')
-    parser.add_argument('--image-duration', type=float, default=5, help='Image duration in seconds')
+    parser.add_argument('--image-duration', type=float, default=12, help='Image duration in seconds')
     parser.add_argument('--max-video-duration', type=float, default=10, help='Max video duration in seconds')
     parser.add_argument('--blur-radius', type=float, default=20, help='Gaussian blur radius')
     parser.add_argument('--zoom-start', type=float, default=1.0, help='Background zoom start')
     parser.add_argument('--zoom-end', type=float, default=1.2, help='Background zoom end')
+    parser.add_argument('--zoom-direction', type=str, default='center',
+                        choices=['top', 'bottom', 'right', 'left', 'top-right', 'top-left', 'bottom-right', 'bottom-left', 'center'],
+                        help='Zoom direction for background')
     parser.add_argument('--overlay-scale', type=float, default=0.9, help='Overlay scale factor (0.0 to 1.0)')
     parser.add_argument('--transition-duration', type=float, default=1.0, help='Crossfade transition duration in seconds')
+    parser.add_argument('--transition-type', type=str, default='fadeblack', 
+                        help='Type of xfade transition (e.g., fade, fadeblack, fadewhite, wipeleft, wiperight, wipeup, wipedown, slideleft, slideright, slideup, slidedown, circlecrop, circleopen, circleclose, vertopen, vertclose, horzopen, horzclose, dissolve, pixelize, radial, hlslice, vuslice, hblur, fadegrays, wipetl, wipetr, wipebl, wipetr, squeezev, squeezeh, zoomin)')
     parser.add_argument('--text-fade-in', type=float, default=0.5, help='Time to complete text fade-in from start of clip (seconds)')
     parser.add_argument('--text-fade-out', type=float, default=0.5, help='Time to complete text fade-out before end of clip (seconds)')
     parser.add_argument('--background-opacity', type=float, default=1.0, help='Background luminosity (0.0 to 1.0, lower is darker)')
     parser.add_argument('--threads', type=int, default=4, help='Number of parallel processing threads')
-    parser.add_argument('--draw-text', type=bool, default=True, help='Whether to draw filename text on clips (True/False)')
+    parser.add_argument('--draw-text', type=bool, default=False, help='Whether to draw filename text on clips (True/False)') # to be removed
     args = parser.parse_args()
     print(assemble(args))
 

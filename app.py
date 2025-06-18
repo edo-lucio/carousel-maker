@@ -108,15 +108,17 @@ class DragDropApp:
             'image_duration': 11.0,
             'max_video_duration': 11.0,
             'blur_radius': 15.0,
-            'zoom_start': 1.4,
-            'zoom_end': 1.6,
+            'zoom_start': 1.6,
+            'zoom_end': 1.8,
+            'zoom_direction': 'top',  # New default value
             'overlay_scale': 0.8,
-            'transition_duration': 1.0,
-            'text_fade_in': 4,
-            'text_fade_out': 2,
+            'transition_duration': 2.0,
+            'transition_type': 'fadeblack',
+            'text_fade_in': 4.0,
+            'text_fade_out': 2.0,
             'background_opacity': 0.8,
             'threads': 2,
-            'draw_text': True
+            'draw_text': False
         }
 
         # Form fields
@@ -148,33 +150,49 @@ class DragDropApp:
         self.zoom_end_var = tk.DoubleVar(value=self.defaults['zoom_end'])
         ttk.Entry(self.form_frame, textvariable=self.zoom_end_var).grid(row=6, column=1, sticky="ew", padx=5, pady=2)
 
-        ttk.Label(self.form_frame, text="Overlay Scale (0-1):").grid(row=7, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(self.form_frame, text="Zoom Direction:").grid(row=7, column=0, sticky="w", padx=5, pady=2)
+        self.zoom_direction_var = tk.StringVar(value=self.defaults['zoom_direction'])
+        ttk.Combobox(self.form_frame, textvariable=self.zoom_direction_var, values=[
+            'center', 'top', 'bottom', 'right', 'left', 'top-right', 'top-left', 'bottom-right', 'bottom-left'
+        ]).grid(row=7, column=1, sticky="ew", padx=5, pady=2)
+
+        ttk.Label(self.form_frame, text="Overlay Scale (0-1):").grid(row=8, column=0, sticky="w", padx=5, pady=2)
         self.overlay_scale_var = tk.DoubleVar(value=self.defaults['overlay_scale'])
-        ttk.Entry(self.form_frame, textvariable=self.overlay_scale_var).grid(row=7, column=1, sticky="ew", padx=5, pady=2)
+        ttk.Entry(self.form_frame, textvariable=self.overlay_scale_var).grid(row=8, column=1, sticky="ew", padx=5, pady=2)
 
-        ttk.Label(self.form_frame, text="Transition Duration (s):").grid(row=8, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(self.form_frame, text="Transition Duration (s):").grid(row=9, column=0, sticky="w", padx=5, pady=2)
         self.transition_duration_var = tk.DoubleVar(value=self.defaults['transition_duration'])
-        ttk.Entry(self.form_frame, textvariable=self.transition_duration_var).grid(row=8, column=1, sticky="ew", padx=5, pady=2)
+        ttk.Entry(self.form_frame, textvariable=self.transition_duration_var).grid(row=9, column=1, sticky="ew", padx=5, pady=2)
 
-        ttk.Label(self.form_frame, text="Text Fade-In (s):").grid(row=9, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(self.form_frame, text="Transition Type:").grid(row=10, column=0, sticky="w", padx=5, pady=2)
+        self.transition_type_var = tk.StringVar(value=self.defaults['transition_type'])
+        ttk.Combobox(self.form_frame, textvariable=self.transition_type_var, values=[
+            'fade', 'fadeblack', 'fadewhite', 'wipeleft', 'wiperight', 'wipeup', 'wipedown',
+            'slideleft', 'slideright', 'slideup', 'slidedown', 'circlecrop', 'circleopen',
+            'circleclose', 'vertopen', 'vertclose', 'horzopen', 'horzclose', 'dissolve',
+            'pixelize', 'radial', 'hlslice', 'vuslice', 'hblur', 'fadegrays', 'wipetl',
+            'wipetr', 'wipebl', 'wipetr', 'squeezev', 'squeezeh', 'zoomin'
+        ]).grid(row=10, column=1, sticky="ew", padx=5, pady=2)
+
+        ttk.Label(self.form_frame, text="Text Fade-In (s):").grid(row=11, column=0, sticky="w", padx=5, pady=2)
         self.text_fade_in_var = tk.DoubleVar(value=self.defaults['text_fade_in'])
-        ttk.Entry(self.form_frame, textvariable=self.text_fade_in_var).grid(row=9, column=1, sticky="ew", padx=5, pady=2)
+        ttk.Entry(self.form_frame, textvariable=self.text_fade_in_var).grid(row=11, column=1, sticky="ew", padx=5, pady=2)
 
-        ttk.Label(self.form_frame, text="Text Fade-Out (s):").grid(row=10, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(self.form_frame, text="Text Fade-Out (s):").grid(row=12, column=0, sticky="w", padx=5, pady=2)
         self.text_fade_out_var = tk.DoubleVar(value=self.defaults['text_fade_out'])
-        ttk.Entry(self.form_frame, textvariable=self.text_fade_out_var).grid(row=10, column=1, sticky="ew", padx=5, pady=2)
+        ttk.Entry(self.form_frame, textvariable=self.text_fade_out_var).grid(row=12, column=1, sticky="ew", padx=5, pady=2)
 
-        ttk.Label(self.form_frame, text="Background Opacity (0-1):").grid(row=11, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(self.form_frame, text="Background Opacity (0-1):").grid(row=13, column=0, sticky="w", padx=5, pady=2)
         self.background_opacity_var = tk.DoubleVar(value=self.defaults['background_opacity'])
-        ttk.Entry(self.form_frame, textvariable=self.background_opacity_var).grid(row=11, column=1, sticky="ew", padx=5, pady=2)
+        ttk.Entry(self.form_frame, textvariable=self.background_opacity_var).grid(row=13, column=1, sticky="ew", padx=5, pady=2)
 
-        ttk.Label(self.form_frame, text="Threads:").grid(row=12, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(self.form_frame, text="Threads:").grid(row=14, column=0, sticky="w", padx=5, pady=2)
         self.threads_var = tk.IntVar(value=self.defaults['threads'])
-        ttk.Entry(self.form_frame, textvariable=self.threads_var).grid(row=12, column=1, sticky="ew", padx=5, pady=2)
+        ttk.Entry(self.form_frame, textvariable=self.threads_var).grid(row=14, column=1, sticky="ew", padx=5, pady=2)
 
-        ttk.Label(self.form_frame, text="Draw Text:").grid(row=13, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(self.form_frame, text="Draw Text:").grid(row=15, column=0, sticky="w", padx=5, pady=2)
         self.draw_text_var = tk.BooleanVar(value=self.defaults['draw_text'])
-        ttk.Checkbutton(self.form_frame, variable=self.draw_text_var).grid(row=13, column=1, sticky="w", padx=5, pady=2)
+        ttk.Checkbutton(self.form_frame, variable=self.draw_text_var).grid(row=15, column=1, sticky="w", padx=5, pady=2)
 
         self.form_frame.columnconfigure(1, weight=1)
 
@@ -225,8 +243,10 @@ class DragDropApp:
                 blur_radius=self.blur_radius_var.get(),
                 zoom_start=self.zoom_start_var.get(),
                 zoom_end=self.zoom_end_var.get(),
+                zoom_direction=self.zoom_direction_var.get(),  # New parameter
                 overlay_scale=self.overlay_scale_var.get(),
                 transition_duration=self.transition_duration_var.get(),
+                transition_type=self.transition_type_var.get(),
                 text_fade_in=self.text_fade_in_var.get(),
                 text_fade_out=self.text_fade_out_var.get(),
                 background_opacity=self.background_opacity_var.get(),
